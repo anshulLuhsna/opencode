@@ -319,7 +319,7 @@ const plugin: Plugin = async (input: PluginInput, options?: Record<string, any>)
       debug("STARTING DISTILL", sessionId, modelInfo)
       setImmediate(async () => {
         try {
-          const result = await (client.session as any).messages({ sessionID: sessionId, limit: 50 })
+          const result = await (client.session as any).messages({ path: { id: sessionId }, query: { limit: 50 } })
           const messages = result?.data as Array<{ info: any; parts: any[] }> | undefined
           debug("GOT MESSAGES", messages?.length)
           if (!messages?.length) return
