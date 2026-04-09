@@ -3,8 +3,17 @@
   "version": "1.0.0",
   "type": "module",
   "main": "index.ts",
+  "description": "Bridges claude-memory-compiler knowledge base into opencode sessions using the user's configured model",
   "peerDependencies": {
     "@opencode-ai/plugin": "*"
   },
-  "description": "Bridges claude-memory-compiler knowledge base into opencode sessions using the user's configured model"
+  "dependencies": {
+    "@ai-sdk/anthropic": "3.0.68",
+    "@ai-sdk/google": "3.0.60",
+    "@ai-sdk/groq": "3.0.35",
+    "@ai-sdk/mistral": "3.0.30",
+    "@ai-sdk/openai": "3.0.52",
+    "@ai-sdk/openai-compatible": "2.0.41",
+    "ai": "6.0.154"
+  }
 }
