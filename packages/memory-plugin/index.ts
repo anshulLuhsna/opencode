@@ -4,7 +4,7 @@
  * Bridges the claude-memory-compiler knowledge base into opencode sessions:
  * - Injects KB index + recent daily log into every chat's system prompt
  * - Injects KB index before context compaction
- * - Captures conversation when a session goes idle → spawns flush.py
+ * - Captures conversation when a session goes idle → distills with Anthropic SDK
  *
  * Configure in .opencode/config.jsonc:
  *   "plugin": [["./opencode/packages/memory-plugin/index.ts", { "kbDir": "./claude-memory-compiler" }]]
@@ -14,7 +14,6 @@ import type { Plugin, Hooks, PluginInput } from "@opencode-ai/plugin"
 import { readFileSync, existsSync, writeFileSync, appendFileSync, mkdirSync } from "fs"
 import { join, resolve, dirname } from "path"
 import { fileURLToPath } from "url"
-import { spawn } from "child_process"
 
 const MAX_INDEX_CHARS = 15_000
 const MAX_LOG_LINES = 30
@@ -74,36 +73,102 @@ function formatMessages(messages: Array<{ info: any; parts: any[] }>): string {
   return context
 }
 
-function spawnFlush(kbDir: string, context: string, sessionId: string): void {
-  const scriptsDir = join(kbDir, "scripts")
-  const logPath = join(scriptsDir, "flush.log")
-
-  const log = (msg: string) => {
-    try {
-      appendFileSync(logPath, `${new Date().toISOString()} INFO [opencode-plugin] ${msg}\n`)
-    } catch {}
-  }
-
+function appendToDaily(kbDir: string, content: string, section: string = "Session"): void {
   try {
-    mkdirSync(scriptsDir, { recursive: true })
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)
-    const contextFile = join(scriptsDir, `session-flush-${sessionId}-${ts}.md`)
-    writeFileSync(contextFile, context, "utf-8")
+    const dailyDir = join(kbDir, "daily")
+    const today = new Date()
+    const dateStr = today.toISOString().slice(0, 10)
+    const logPath = join(dailyDir, `${dateStr}.md`)
 
-    const child = spawn(
-      "uv",
-      ["run", "--directory", kbDir, "python", join(scriptsDir, "flush.py"), contextFile, sessionId],
-      {
-        detached: true,
-        stdio: "ignore",
-        env: { ...process.env, CLAUDE_INVOKED_BY: "memory_flush" },
-      }
-    )
-    child.unref()
+    mkdirSync(dailyDir, { recursive: true })
 
-    log(`Spawned flush.py for session ${sessionId} (${context.length} chars)`)
+    if (!existsSync(logPath)) {
+      writeFileSync(
+        logPath,
+        `# Daily Log: ${dateStr}\n\n## Sessions\n\n## Memory Maintenance\n\n`,
+        "utf-8"
+      )
+    }
+
+    const timeStr = today.toTimeString().slice(0, 5)
+    const entry = `### ${section} (${timeStr})\n\n${content}\n\n`
+    appendFileSync(logPath, entry, "utf-8")
   } catch (e) {
-    log(`Failed to spawn flush: ${e}`)
+    console.error(`Failed to append to daily log: ${e}`)
+  }
+}
+
+async function distillAndSave(
+  kbDir: string,
+  context: string,
+  sessionId: string,
+  client: any
+): Promise<void> {
+  try {
+    const prompt = `Review the conversation context below and respond with a concise summary
+of important items that should be preserved in the daily log.
+Do NOT use any tools — just return plain text.
+
+Format your response as a structured daily log entry with these sections:
+
+**Context:** [One line about what the user was working on]
+
+**Key Exchanges:**
+- [Important Q&A or discussions]
+
+**Decisions Made:**
+- [Any decisions with rationale]
+
+**Lessons Learned:**
+- [Gotchas, patterns, or insights discovered]
+
+**Action Items:**
+- [Follow-ups or TODOs mentioned]
+
+Skip anything that is:
+- Routine tool calls or file reads
+- Content that's trivial or obvious
+- Trivial back-and-forth or clarification exchanges
+
+Only include sections that have actual content. If nothing is worth saving,
+respond with exactly: FLUSH_OK
+
+## Conversation Context
+
+${context}`
+
+    // Use opencode's configured model (whatever the user has set up)
+    let result = ""
+    try {
+      // Try streaming API if available
+      const stream = await (client as any).prompt?.({
+        prompt,
+        stream: true,
+      })
+      if (stream) {
+        for await (const chunk of stream) {
+          if (typeof chunk === "string") result += chunk
+          else if (chunk?.text) result += chunk.text
+        }
+      }
+    } catch {
+      // Fall back to non-streaming if available
+      const response = await (client as any).prompt?.({ prompt })
+      result = typeof response === "string" ? response : response?.text || ""
+    }
+
+    if (!result) {
+      appendToDaily(kbDir, "DISTILL_ERROR: No response from model", "Memory Distillation")
+      return
+    }
+
+    if (result.includes("FLUSH_OK")) {
+      appendToDaily(kbDir, "FLUSH_OK - Nothing worth saving from this session", "Memory Distillation")
+    } else {
+      appendToDaily(kbDir, result, "Session")
+    }
+  } catch (e) {
+    appendToDaily(kbDir, `DISTILL_ERROR: ${e}`, "Memory Distillation")
   }
 }
 
@@ -165,7 +230,7 @@ const plugin: Plugin = async (input: PluginInput, options?: Record<string, any>)
           const context = formatMessages(messages)
           if (!context.trim()) return
 
-          spawnFlush(kbDir, context, sessionId)
+          await distillAndSave(kbDir, context, sessionId, client)
         } catch {}
       })
     },
