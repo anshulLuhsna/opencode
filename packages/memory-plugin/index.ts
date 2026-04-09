@@ -4,14 +4,21 @@
  * Bridges the claude-memory-compiler knowledge base into opencode sessions:
  * - Injects KB index + recent daily log into every chat's system prompt
  * - Injects KB index before context compaction
- * - Captures conversation when session goes idle → distills using opencode's configured model
+ * - Captures conversation when session goes idle → distills using configured model
  *
- * Configure in .opencode/config.jsonc:
- *   "plugin": [["./opencode/packages/memory-plugin/index.ts", { "kbDir": "./claude-memory-compiler" }]]
+ * Configure in .opencode/opencode.jsonc:
+ *   "plugin": [["../opencode/packages/memory-plugin/index.ts", {
+ *     "kbDir": "./claude-memory-compiler",
+ *     "distill": {
+ *       "providerID": "openai",         // or "anthropic", "google", "groq", "ollama", etc.
+ *       "modelID": "gpt-4o-mini",       // model to use for distillation
+ *       "apiKey": "sk-...",             // optional, falls back to env var
+ *       "baseURL": "http://..."         // optional, for openai-compatible providers
+ *     }
+ *   }]]
  */
 
-import type { Plugin, Hooks, PluginInput, ProviderContext } from "@opencode-ai/plugin"
-import type { Model } from "@opencode-ai/sdk"
+import type { Plugin, Hooks, PluginInput } from "@opencode-ai/plugin"
 import { readFileSync, existsSync, writeFileSync, appendFileSync, mkdirSync } from "fs"
 import { join, resolve, dirname } from "path"
 import { fileURLToPath } from "url"
@@ -20,6 +27,13 @@ import { generateText } from "ai"
 const MAX_INDEX_CHARS = 15_000
 const MAX_LOG_LINES = 30
 const FLUSH_DEDUP_MS = 60_000
+
+const DEBUG_FILE = "/tmp/opencode-memory-plugin.log"
+
+function debug(...args: unknown[]) {
+  const msg = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}\n`
+  try { appendFileSync(DEBUG_FILE, msg) } catch {}
+}
 
 type ModelInfo = {
   providerID: string
@@ -82,6 +96,7 @@ function formatMessages(messages: Array<{ info: any; parts: any[] }>): string {
 
 function appendToDaily(kbDir: string, content: string, section = "Session"): void {
   try {
+    debug("appendToDaily", { kbDir, section, contentLength: content.length })
     const dailyDir = join(kbDir, "daily")
     const today = new Date()
     const dateStr = today.toISOString().slice(0, 10)
@@ -92,7 +107,10 @@ function appendToDaily(kbDir: string, content: string, section = "Session"): voi
     }
     const timeStr = today.toTimeString().slice(0, 5)
     appendFileSync(logPath, `### ${section} (${timeStr})\n\n${content}\n\n`, "utf-8")
-  } catch {}
+    debug("appendToDaily done")
+  } catch (err) {
+    debug("appendToDaily ERROR", err)
+  }
 }
 
 async function getLanguageModel(info: ModelInfo) {
@@ -133,6 +151,7 @@ async function getLanguageModel(info: ModelInfo) {
 
 async function distillAndSave(kbDir: string, context: string, modelInfo: ModelInfo): Promise<void> {
   try {
+    debug("distillAndSave", { providerID: modelInfo.providerID, modelID: modelInfo.modelID })
     const model = await getLanguageModel(modelInfo)
 
     const prompt = `Review the conversation context below and respond with a concise summary
@@ -175,6 +194,7 @@ ${context}`
       appendToDaily(kbDir, text, "Session")
     }
   } catch (e) {
+    debug("distillAndSave ERROR", e)
     appendToDaily(kbDir, `DISTILL_ERROR: ${e}`, "Memory Distillation")
   }
 }
@@ -183,26 +203,61 @@ const plugin: Plugin = async (input: PluginInput, options?: Record<string, any>)
   const kbDir = resolveKbDir(import.meta.url, options?.kbDir as string | undefined)
   const client = input.client
 
+  // Explicit distill model from config — used for distillation instead of the session model.
+  // Required when the session model is an internal provider (e.g. "opencode/big-pickle").
+  const distillConfig: ModelInfo | undefined = options?.distill
+    ? {
+        providerID: options.distill.providerID as string,
+        modelID: options.distill.modelID as string,
+        apiKey: options.distill.apiKey as string | undefined,
+        baseURL: options.distill.baseURL as string | undefined,
+      }
+    : undefined
+
+  try { writeFileSync(DEBUG_FILE, `=== PLUGIN INIT ${new Date().toISOString()} ===\n`) } catch {}
+  debug("PLUGIN INIT", { kbDir, distillConfig })
+
   const lastFlushAt = new Map<string, number>()
-  // Capture model/provider info from chat.params as sessions send messages
+  // Fallback: capture model/provider info from chat.params (only for real external providers)
   const sessionModels = new Map<string, ModelInfo>()
 
   return {
-    // Capture which model is active for each session
+    // Capture which model is active for each session (best-effort, may not fire for all providers)
     "chat.params": async (hookInput) => {
-      const provider = hookInput.provider as ProviderContext
-      const model = hookInput.model as Model
-      // Resolve API key: provider.options.apiKey first, then fall back to env vars listed in provider.info.env
-      const envKey = (provider.info as any).env?.map((k: string) => process.env[k]).find(Boolean)
-      sessionModels.set(hookInput.sessionID, {
-        providerID: provider.info.id,
-        modelID: (model as any).id ?? (model as any).modelID ?? "",
-        apiKey: (provider.options as any)?.apiKey ?? envKey,
-        baseURL: (provider.options as any)?.baseURL,
-      })
+      try {
+        debug("chat.params fired", hookInput.sessionID)
+        const provider = (hookInput as any).provider
+        const model = (hookInput as any).model
+
+        const providerID: string = provider?.info?.id ?? provider?.id ?? ""
+        const modelID: string = model?.id ?? model?.modelID ?? ""
+
+        // Skip internal opencode routing providers — they can't be called via AI SDK
+        if (!providerID || providerID === "opencode") {
+          debug("chat.params skipping internal provider", { providerID, modelID })
+          return
+        }
+
+        // Resolve API key from provider options or env vars listed in provider.info.env
+        const envKey = (provider?.info?.env as string[] | undefined)
+          ?.map((k: string) => process.env[k])
+          .find(Boolean)
+
+        const modelInfo: ModelInfo = {
+          providerID,
+          modelID,
+          apiKey: provider?.options?.apiKey ?? envKey,
+          baseURL: provider?.options?.baseURL,
+        }
+        sessionModels.set(hookInput.sessionID, modelInfo)
+        debug("model stored", hookInput.sessionID, modelInfo)
+      } catch (err) {
+        debug("chat.params ERROR (non-fatal)", err)
+      }
     },
 
     "experimental.chat.system.transform": async (_input, output) => {
+      debug("system.transform fired")
       try {
         const index = readKbIndex(kbDir)
         const recentLog = readRecentLog(kbDir)
@@ -215,44 +270,68 @@ const plugin: Plugin = async (input: PluginInput, options?: Record<string, any>)
           `### Knowledge Base Index\n\n${index}\n\n` +
           `### Recent Daily Log\n\n${recentLog}`
         )
-      } catch {}
+      } catch (err) {
+        debug("system.transform ERROR", err)
+      }
     },
 
     "experimental.session.compacting": async (_input, output) => {
+      debug("compacting fired")
       try {
         output.context.push(`## Knowledge Base Index\n\n${readKbIndex(kbDir)}`)
-      } catch {}
+      } catch (err) {
+        debug("compacting ERROR", err)
+      }
     },
 
     event: async ({ event }) => {
       const e = event as any
+      debug("EVENT", e.type, e.properties)
+
       const isIdle =
         (e.type === "session.status" && e.properties?.status?.type === "idle") ||
         e.type === "session.idle"
       if (!isIdle) return
 
+      debug("IDLE DETECTED", e.type)
+
       const sessionId: string | undefined = e.properties?.sessionID ?? e.properties?.sessionId
-      if (!sessionId) return
-
-      const now = Date.now()
-      if (now - (lastFlushAt.get(sessionId) ?? 0) < FLUSH_DEDUP_MS) return
-      lastFlushAt.set(sessionId, now)
-
-      const modelInfo = sessionModels.get(sessionId)
-      if (!modelInfo) {
-        appendToDaily(kbDir, "DISTILL_SKIP: No model info captured for this session", "Memory Distillation")
+      if (!sessionId) {
+        debug("NO SESSION ID")
         return
       }
 
+      const now = Date.now()
+      if (now - (lastFlushAt.get(sessionId) ?? 0) < FLUSH_DEDUP_MS) {
+        debug("DEDUP", sessionId)
+        return
+      }
+      lastFlushAt.set(sessionId, now)
+
+      // Prefer explicit distill config, fall back to captured session model
+      const modelInfo = distillConfig ?? sessionModels.get(sessionId)
+      if (!modelInfo) {
+        debug("NO MODEL INFO", sessionId)
+        appendToDaily(kbDir, "DISTILL_SKIP: No model configured — add a 'distill' option in opencode.jsonc", "Memory Distillation")
+        return
+      }
+
+      debug("STARTING DISTILL", sessionId, modelInfo)
       setImmediate(async () => {
         try {
           const result = await (client.session as any).messages({ sessionID: sessionId, limit: 50 })
           const messages = result?.data as Array<{ info: any; parts: any[] }> | undefined
+          debug("GOT MESSAGES", messages?.length)
           if (!messages?.length) return
           const context = formatMessages(messages)
           if (!context.trim()) return
+          debug("DISTILLING...")
           await distillAndSave(kbDir, context, modelInfo)
-        } catch {}
+          debug("DONE")
+        } catch (err) {
+          debug("DISTILL ERROR", err)
+          appendToDaily(kbDir, `DISTILL_ERROR: ${err}`, "Memory Distillation")
+        }
       })
     },
   }
