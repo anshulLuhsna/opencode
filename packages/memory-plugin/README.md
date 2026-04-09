@@ -206,6 +206,76 @@ See the [claude-memory-compiler README](https://github.com/coleam00/claude-memor
 
 ---
 
+## Obsidian integration
+
+The plugin generates Obsidian-optimized markdown with backlinks and YAML frontmatter. Use it as the frontend for your learning system.
+
+### Setup (symlink method)
+
+```bash
+# In your Obsidian vault root directory
+ln -s /path/to/claude-memory-compiler ./research-memory
+```
+
+Your daily logs now appear in Obsidian under `research-memory/daily/`. They automatically include:
+
+- **YAML frontmatter** — type, tags, date for filtering and sorting
+- **Backlinks** `[[Topic]]` — key concepts auto-linked to build your knowledge graph
+- **Outline** — quick scan of what was discussed
+- **Related Topics** — connections to other sessions and concepts
+
+### Example session (as it appears in Obsidian)
+
+```markdown
+---
+type: session
+tags: [research, learning, database]
+date: 2026-04-09
+---
+
+# Session: PostgreSQL vs NoSQL Trade-offs
+
+## Outline
+- [[PostgreSQL]]: Relational option chosen
+- [[NoSQL]]: Alternative explored
+- [[Indexing]]: Key performance consideration
+
+## Context
+Decided to use [[PostgreSQL]] with connection pooling for the project, 
+rejecting [[MongoDB]] after comparing trade-offs.
+
+## Key Exchanges
+- [[ACID transactions]]: Why [[PostgreSQL]] provides guarantees [[NoSQL]] doesn't
+- [[Query performance]]: [[Indexing strategies]] for this use case
+
+## Decisions Made
+- [[PostgreSQL]]: Chosen because [[ACID]] is critical for this domain
+
+## Related Topics
+- [[database-design]]
+- [[performance-optimization]]
+- [[system-architecture]]
+
+## Action Items
+- Set up [[connection pooling]] with pgbouncer
+- Design [[database schema]] following normalization
+```
+
+### Obsidian workflow
+
+1. **Browse sessions** — `research-memory/daily/` shows all your sessions
+2. **Click backlinks** — `[[PostgreSQL]]` links to other sessions mentioning databases
+3. **View graph** — Obsidian's graph shows how concepts connect
+4. **Tag filter** — search by `#research` or `#learning` to see related sessions
+5. **Broken links** — `[[ConceptIHeardAbout]]` without an article is a hint to research it
+
+Over time your knowledge graph grows automatically. You'll spot:
+- Which topics come up repeatedly (sign they're important)
+- Unexpected connections between ideas
+- Gaps in your understanding (broken links you haven't written about)
+
+---
+
 ## Troubleshooting
 
 **`GOT MESSAGES undefined`** — wrong session ID parameter. Make sure you're on the latest version of this plugin (the fix is in the `path: { id }` call).

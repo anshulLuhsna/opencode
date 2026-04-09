@@ -5,6 +5,10 @@
  * - Injects KB index + recent daily log into every chat's system prompt
  * - Injects KB index before context compaction
  * - Captures conversation when session goes idle → distills using configured model
+ * - Generates Obsidian-optimized markdown with backlinks and YAML frontmatter
+ *
+ * Works great with Obsidian: symlink claude-memory-compiler/daily into your vault
+ * and watch your knowledge graph build automatically.
  *
  * Configure in .opencode/opencode.jsonc:
  *   "plugin": [["../opencode/packages/memory-plugin/index.ts", {
@@ -154,33 +158,58 @@ async function distillAndSave(kbDir: string, context: string, modelInfo: ModelIn
     debug("distillAndSave", { providerID: modelInfo.providerID, modelID: modelInfo.modelID })
     const model = await getLanguageModel(modelInfo)
 
+    const today = new Date().toISOString().split('T')[0]
     const prompt = `Review the conversation context below and respond with a concise summary
-of important items that should be preserved in the daily log.
-Do NOT use any tools — just return plain text.
+optimized for Obsidian. Use backlinks [[topic]] to create a knowledge graph.
+Do NOT use any tools — just return markdown + YAML frontmatter.
 
-Format your response as a structured daily log entry with these sections:
+START with YAML frontmatter on lines 1-5 (no code fence):
+---
+type: session
+tags: [tag1, tag2, ...]
+date: ${today}
+---
 
-**Context:** [One line about what the user was working on]
+THEN the content formatted exactly like this:
 
-**Key Exchanges:**
-- [Important Q&A or discussions]
+# Session: [One-line title extracted from the conversation]
 
-**Decisions Made:**
-- [Any decisions with rationale]
+## Outline
+- [[MainTopic1]]: Brief one-liner
+- [[MainTopic2]]: Brief one-liner
 
-**Lessons Learned:**
-- [Gotchas, patterns, or insights discovered]
+## Context
+One sentence about what was discussed. Link key topics: [[topic1]], [[topic2]].
 
-**Action Items:**
-- [Follow-ups or TODOs mentioned]
+## Key Exchanges
+- [[Topic1]]: Summary of discussion linking related concepts [[related-concept]]
+- [[Topic2]]: What was learned, with backlinks to relevant areas
+
+## Decisions Made
+- [[ChosenApproach]]: Why this was chosen over [[Alternative1]] and [[Alternative2]]
+
+## Lessons Learned
+- Pattern about [[topic]]: The insight with link to related [[concept]]
+
+## Related Topics
+Link to connected areas: [[RelatedTopic1]], [[RelatedTopic2]]
+
+## Action Items
+- Research/explore [[next-topic]]
+- Implement [[approach]] following [[pattern]]
+
+RULES for backlinks:
+- Extract EVERY key concept, framework, technology, and topic as [[PascalCase]]
+- Link related concepts together throughout — this builds your knowledge graph
+- Use WikiLink format: [[topic]] or [[topic|display text]]
+- Create backlinks even if the article doesn't exist yet — Obsidian will show "broken links" you should write about
 
 Skip anything that is:
 - Routine tool calls or file reads
-- Content that's trivial or obvious
-- Trivial back-and-forth or clarification exchanges
+- Trivial back-and-forth
+- Obvious content
 
-Only include sections that have actual content. If nothing is worth saving,
-respond with exactly: FLUSH_OK
+If nothing is worth saving, respond with exactly: FLUSH_OK
 
 ## Conversation Context
 
